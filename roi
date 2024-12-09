@@ -1,0 +1,113 @@
+import os
+import streamlit as st
+import SimpleITK as sitk
+import numpy as np
+import scipy.ndimage
+
+def resample_image_itk(imagePath, preferenceNii, newSpacing=[3.0, 3.0, 3.0], resamplemethod=sitk.sitkLinear):
+    image = sitk.ReadImage(preferenceNii)
+    resample = sitk.ResampleImageFilter()
+    resample.SetInterpolator(resamplemethod)
+    resample.SetOutputDirection(image.GetDirection())
+    resample.SetOutputOrigin(image.GetOrigin())
+    newSpacing = np.array(newSpacing, float)
+    newSize = image.GetSize() / newSpacing * image.GetSpacing()
+    newSize = np.around(newSize, decimals=0)
+    newSize = newSize.astype(int)
+    resample.SetSize(newSize.tolist())
+    resample.SetOutputSpacing(newSpacing)
+    image_resample = sitk.ReadImage(imagePath)
+    newimage = resample.Execute(image_resample)
+    return newimage
+
+def expand_dilation(mask_img_arr, iterations=5):
+    shape_nrrd = mask_img_arr.shape
+    mask_img_arr_expand = np.zeros(shape_nrrd)
+    for index in range(shape_nrrd[0]):
+        mask_img_arr_expand[index, :, :] = scipy.ndimage.binary_dilation(mask_img_arr[index, :, :], iterations=iterations).astype('uint16')
+    return mask_img_arr_expand
+
+def diffROI(mask_img_arr, mask_img_arr_expand):
+    mask_img_arr[mask_img_arr != 0] = 1
+    mask_img_arr_expand[mask_img_arr_expand != 0] = 1
+    shape_nrrd = mask_img_arr.shape
+    mask_img_arr_border = np.zeros(shape_nrrd)
+    for index in range(shape_nrrd[0]):
+        for x in range(shape_nrrd[1]):
+            for y in range(shape_nrrd[2]):
+                if mask_img_arr[index, x, y] != mask_img_arr_expand[index, x, y]:
+                    mask_img_arr_border[index, x, y] = 1
+    return mask_img_arr_border
+
+def array2nii(image_array, out_path, NIIimage_resample):
+    image2 = NIIimage_resample
+    origin = image2.GetOrigin()
+    spacing = image2.GetSpacing()
+    direction = image2.GetDirection()
+    image3 = sitk.GetImageFromArray(image_array)
+    image3.SetSpacing(spacing)
+    image3.SetDirection(direction)
+    image3.SetOrigin(origin)
+    sitk.WriteImage(image3, out_path)
+
+def process_images_in_directory(img_dir, roi_dir, out_dir, newSpacing=[1.0, 1.0, 1.0], iteration=3):
+    img_files = [f for f in os.listdir(img_dir) if f.endswith('.nii.gz')]
+    roi_files = [f for f in os.listdir(roi_dir) if f.endswith('.nii.gz')]
+
+    out_images_dir = os.path.join(out_dir, 'images')
+    out_masks_dir = os.path.join(out_dir, 'masks')
+
+    if not os.path.exists(out_images_dir):
+        os.makedirs(out_images_dir)
+    if not os.path.exists(out_masks_dir):
+        os.makedirs(out_masks_dir)
+
+    for img_file, roi_file in zip(img_files, roi_files):
+        img_path = os.path.join(img_dir, img_file)
+        roi_path = os.path.join(roi_dir, roi_file)
+
+        tumorImage = sitk.ReadImage(img_path)
+        newSpacing = [1.0, 1.0, tumorImage.GetSpacing()[2]]
+        
+        Niimage_resample = resample_image_itk(img_path, preferenceNii=img_path, newSpacing=newSpacing, resamplemethod=sitk.sitkLinear)
+        image_array = sitk.GetArrayFromImage(Niimage_resample)
+
+        mask_img_resample = resample_image_itk(roi_path, preferenceNii=img_path, newSpacing=newSpacing, resamplemethod=sitk.sitkNearestNeighbor)
+        mask_img_arr = sitk.GetArrayFromImage(mask_img_resample)
+
+        mask_img_arr_expand = expand_dilation(mask_img_arr, iterations=iteration)
+        mask_img_arr_border = diffROI(mask_img_arr, mask_img_arr_expand)
+
+        base_name = os.path.splitext(img_file)[0]
+
+        outNII_path = os.path.join(out_images_dir, f'{base_name}.nii.gz')
+        outROI_path = os.path.join(out_masks_dir, f'{base_name}.nii.gz')
+
+        array2nii(image_array, outNII_path, Niimage_resample)
+        array2nii(mask_img_arr_border, outROI_path, Niimage_resample)
+
+        st.write(f"Processed: {img_file}, {roi_file}")
+
+import streamlit as st
+
+def main():
+    st.title("WCC图像重采样和瘤周ROI扩展")
+    
+    # 用户输入路径
+    img_dir = st.text_input("请输入图像目录路径", r'C:\Users\WCC\Desktop\first\images')
+    roi_dir = st.text_input("请输入ROI目录路径", r'C:\Users\WCC\Desktop\first\masks')
+    out_dir = st.text_input("请输入输出目录路径", r'C:\Users\WCC\Desktop\first\out')
+    
+    # 输入迭代次数
+    iteration = st.number_input("扩张体素", min_value=1, max_value=10, value=3)
+    
+    # 按钮，触发图像处理
+    if st.button("处理图像"):
+        if img_dir and roi_dir and out_dir:
+            process_images_in_directory(img_dir, roi_dir, out_dir, iteration=iteration)
+            st.success("处理完成！")
+        else:
+            st.error("请输入有效的目录路径")
+
+if __name__ == "__main__":
+    main()
